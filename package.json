@@ -1,0 +1,67 @@
+{
+  "name": "effect-saga",
+  "version": "0.1.0",
+  "description": "Redux saga implementation using Effect library",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "redux",
+    "saga",
+    "effect",
+    "functional",
+    "reactive",
+    "state-management"
+  ],
+  "author": "c4605",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bolasblack/effect-saga"
+  },
+  "bugs": {
+    "url": "https://github.com/bolasblack/effect-saga/issues"
+  },
+  "homepage": "https://github.com/bolasblack/effect-saga#readme",
+  "peerDependencies": {
+    "redux": ">=5.0.0",
+    "effect": ">=3.0.0"
+  },
+  "devDependencies": {
+    "redux": "^5.0.0",
+    "effect": "^3.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.38.0",
+    "@typescript-eslint/parser": "^8.38.0",
+    "eslint": "^9.32.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.3",
+    "typescript-eslint": "^8.38.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "prettier": {
+    "singleQuote": true,
+    "trailingComma": "all",
+    "semi": false,
+    "arrowParens": "avoid"
+  }
+}
