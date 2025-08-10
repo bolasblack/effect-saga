@@ -105,7 +105,7 @@ await sagaRunner.start()
 
 ### Effects
 
-Effects are declarative descriptions of side effects that are executed by the saga middleware. This library provides several effect creators:
+Effects are declarative descriptions of side effects that are executed by the effect-saga middleware. This library provides several effect creators:
 
 #### `put(action)`
 
@@ -176,15 +176,14 @@ const userStream = makeStateStream((state: RootState) => state.user)
 Spawns a new handler for every matching action (concurrent execution).
 
 ```typescript
-yield*
-  takeEvery(makeActionStream(actionPattern('task/start')), streamValue =>
-    Effect.gen(function* () {
-      // Handle each task start
-      const { action, state, stateSnapshot } = streamValue
-      console.log('Task started:', action)
-      yield* put({ type: 'task/processing' })
-    }),
-  )
+yield* takeEvery(makeActionStream(actionPattern('task/start')), streamValue =>
+  Effect.gen(function* () {
+    // Handle each task start
+    const { action, state, stateSnapshot } = streamValue
+    console.log('Task started:', action)
+    yield* put({ type: 'task/processing' })
+  }),
+)
 ```
 
 #### `takeLatest(stream, handler)`
@@ -192,23 +191,22 @@ yield*
 Cancels any previous handler and runs only the latest (serial execution with cancellation).
 
 ```typescript
-yield*
-  takeLatest(makeActionStream(actionPattern('search/query')), streamValue =>
-    Effect.gen(function* () {
-      // Only handle the latest search query
-      const { action } = streamValue
-      const query = (action as any).payload
+yield* takeLatest(makeActionStream(actionPattern('search/query')), streamValue =>
+  Effect.gen(function* () {
+    // Only handle the latest search query
+    const { action } = streamValue
+    const query = (action as any).payload
 
-      // This will be cancelled if a new search comes in
-      yield* Effect.sleep('500 millis') // Debounce
+    // This will be cancelled if a new search comes in
+    yield* Effect.sleep('500 millis') // Debounce
 
-      const results = yield* Effect.tryPromise(() =>
-        fetch(`/api/search?q=${query}`).then(r => r.json()),
-      )
+    const results = yield* Effect.tryPromise(() =>
+      fetch(`/api/search?q=${query}`).then(r => r.json()),
+    )
 
-      yield* put({ type: 'search/results', payload: results })
-    }),
-  )
+    yield* put({ type: 'search/results', payload: results })
+  }),
+)
 ```
 
 #### `combineSagas(...sagas)`
