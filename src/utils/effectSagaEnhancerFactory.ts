@@ -29,7 +29,7 @@ export const effectSagaEnhancerFactory =
 
 export interface EffectSagaRunner<A, E = never, R = never> {
   enhancer: StoreEnhancer<StoreExt>
-  switchSaga: (saga: Effect.Effect<A, E, R>) => Promise<void>
+  switchSaga: (saga: Effect.Effect<A, E, StoreService | R>) => Promise<void>
   start: () => Promise<void>
   stop: () => Promise<void>
 }
