@@ -154,7 +154,7 @@ export const takeLatest = Effect.fn('takeLatest')(function* <
   )
 })
 
-export const put = Effect.fn('put')(function* (action: Action) {
+export const put = Effect.fn('put')(function* <A extends Action>(action: A) {
   const { dispatch } = yield* StoreService
   dispatch(action)
 })

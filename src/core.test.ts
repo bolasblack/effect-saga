@@ -1,17 +1,27 @@
-import { Effect, Stream } from 'effect'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { Deferred, Effect, Stream } from 'effect'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from 'vitest'
 import {
   Store,
   StoreService,
   actionPattern,
   makeStateStream,
   makeStoreService,
+  makeActionStream,
   put,
   select,
   take,
   takeEvery,
   takeLatest,
 } from './core'
+import { ActionListener } from './utils/subscribeStoreActionEnhancerFactory'
 
 // Helper to create action creators
 const createAction = <P = void>(
@@ -111,6 +121,76 @@ describe('effect-saga core', () => {
       const action = testAction('payload')
       expect(pattern(action)).toBe(true)
       expect(pattern({ type: 'other' })).toBe(false)
+    })
+  })
+
+  describe('makeActionStream', () => {
+    it('should emit matching actions with state', async () => {
+      const listeners = new Set<ActionListener>()
+
+      const subscribedSignal = Effect.runSync(Deferred.make<void>())
+
+      const layer = makeStoreService({
+        ...mockStore,
+        subscribeAction: vi.fn(listener => {
+          listeners.add(listener)
+          Effect.runSync(Deferred.succeed(subscribedSignal, void 0))
+          return () => {
+            listeners.delete(listener)
+          }
+        }),
+      })
+      const pattern = actionPattern('test/action')
+
+      const program = Effect.gen(function* () {
+        const emitted: any[] = []
+
+        // Start collecting values
+        const fiber = yield* Effect.fork(
+          makeActionStream(pattern).pipe(
+            Stream.take(1),
+            Stream.runForEach(value => Effect.sync(() => emitted.push(value))),
+          ),
+        )
+
+        // wait listeners to be subscribed
+        yield* Deferred.await(subscribedSignal)
+
+        // Should be ignored
+        listeners.forEach(listener => listener({ type: 'other' }, 1))
+        // Should be emitted
+        listeners.forEach(listener =>
+          listener({ type: 'test/action', payload: 1 }, 1),
+        )
+
+        // wait fiber to finish
+        yield* fiber.await
+
+        expect(emitted).toHaveLength(1)
+        expect(emitted[0].action).toEqual({ type: 'test/action', payload: 1 })
+        expect(emitted[0].stateSnapshot).toEqual(1)
+        expect(emitted[0].state).toEqual(initialState)
+      })
+
+      await Effect.runPromise(program.pipe(Effect.provide(layer)))
+    })
+
+    it('should infer correct action type', () => {
+      const pattern = actionPattern<{ type: 'A'; payload: number }>('A')
+      const stream = makeActionStream(pattern)
+
+      // Type check only
+      expectTypeOf(stream).toEqualTypeOf<
+        Stream.Stream<
+          {
+            action: { type: 'A'; payload: number }
+            stateSnapshot: unknown
+            state: unknown
+          },
+          never,
+          StoreService
+        >
+      >()
     })
   })
 
