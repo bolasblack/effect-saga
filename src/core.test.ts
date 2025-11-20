@@ -1,13 +1,5 @@
 import { Deferred, Effect, Stream } from 'effect'
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  expectTypeOf,
-  it,
-  vi,
-} from 'vitest'
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import {
   Store,
   StoreService,
@@ -207,14 +199,64 @@ describe('effect-saga core', () => {
       await Effect.runPromise(program.pipe(Effect.provide(layer)))
     })
 
-    it('should only emit when selected value changes', async () => {
-      let listeners: any[] = []
+    it('should emit new values when state changes', async () => {
+      const listeners = new Set<ActionListener>()
+      const subscribedSignal = Effect.runSync(Deferred.make<void>())
+
       const customStore = {
         ...mockStore,
         subscribeAction: vi.fn(listener => {
-          listeners.push(listener)
+          listeners.add(listener)
+          Effect.runSync(Deferred.succeed(subscribedSignal, void 0))
           return () => {
-            listeners = listeners.filter(l => l !== listener)
+            listeners.delete(listener)
+          }
+        }),
+      }
+
+      const layer = makeStoreService(customStore)
+
+      const program = Effect.gen(function* () {
+        const stream = makeStateStream((state: State) => state.counter)
+        const values: number[] = []
+
+        const fiber = yield* Effect.fork(
+          stream.pipe(
+            Stream.take(3),
+            Stream.runForEach(value => Effect.sync(() => values.push(value))),
+          ),
+        )
+
+        yield* Deferred.await(subscribedSignal)
+
+        yield* Effect.sync(() => {
+          customStore.getState = () => ({ counter: 1 })
+          listeners.forEach(l => l({ type: 'UPDATE' }, {}))
+        })
+
+        yield* Effect.sync(() => {
+          customStore.getState = () => ({ counter: 2 })
+          listeners.forEach(l => l({ type: 'UPDATE' }, {}))
+        })
+
+        yield* fiber.await
+        expect(values).toEqual([0, 1, 2])
+      })
+
+      await Effect.runPromise(program.pipe(Effect.provide(layer)))
+    })
+
+    it('should only emit when selected value changes', async () => {
+      const listeners = new Set<ActionListener>()
+      const subscribedSignal = Effect.runSync(Deferred.make<void>())
+
+      const customStore = {
+        ...mockStore,
+        subscribeAction: vi.fn(listener => {
+          listeners.add(listener)
+          Effect.runSync(Deferred.succeed(subscribedSignal, void 0))
+          return () => {
+            listeners.delete(listener)
           }
         }),
       }
@@ -233,14 +275,13 @@ describe('effect-saga core', () => {
           ),
         )
 
-        // Simulate state changes with delays to ensure proper processing
+        yield* Deferred.await(subscribedSignal)
+
         yield* Effect.sync(() => {
           // Same value - should not emit
           customStore.getState = () => ({ counter: 0 })
           listeners.forEach(l => l({ type: 'action1' }, {}))
         })
-
-        yield* Effect.sleep('10 millis')
 
         yield* Effect.sync(() => {
           // New value - should emit
@@ -248,23 +289,17 @@ describe('effect-saga core', () => {
           listeners.forEach(l => l({ type: 'action2' }, {}))
         })
 
-        yield* Effect.sleep('10 millis')
-
         yield* Effect.sync(() => {
           // Same value - should not emit
           customStore.getState = () => ({ counter: 1 })
           listeners.forEach(l => l({ type: 'action3' }, {}))
         })
 
-        yield* Effect.sleep('10 millis')
-
         yield* Effect.sync(() => {
           // New value - should emit
           customStore.getState = () => ({ counter: 2 })
           listeners.forEach(l => l({ type: 'action4' }, {}))
         })
-
-        yield* Effect.sleep('10 millis')
 
         yield* fiber.await
         expect(values).toEqual([0, 1, 2])
