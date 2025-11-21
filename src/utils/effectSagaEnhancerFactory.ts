@@ -1,4 +1,4 @@
-import { Effect, Fiber, Layer, Runtime } from 'effect'
+import { Cause, Effect, Exit, Fiber, Layer, Runtime } from 'effect'
 import { Store as ReduxStore, StoreEnhancer } from 'redux'
 import { makeStoreService, StoreService } from '../core'
 import { defer } from '../helpers/defer'
@@ -34,15 +34,17 @@ export interface EffectSagaRunner<A, E = never, R = never> {
   stop: () => Promise<void>
 }
 
+type CreateEffectSagaRunnerOptions<
+  Layers extends Layer.Layer<any, any, any>[] = never[],
+> = {
+  extraLayers?: Layers
+  onError?: (exit: Exit.Failure<any, any>) => void
+}
+
 export interface CreateEffectSagaRunnerFn {
   <A, E>(
     saga: Effect.Effect<A, E, StoreService>,
-  ): Promise<EffectSagaRunner<A, E>>
-
-  <A, E>(
-    saga: Effect.Effect<A, E, StoreService>,
-    // eslint-disable-next-line @typescript-eslint/no-empty-object-type
-    options: {},
+    options?: CreateEffectSagaRunnerOptions,
   ): Promise<EffectSagaRunner<A, E>>
 
   <A, E, Layers extends Layer.Layer<any, any, any>[] = never[]>(
@@ -51,9 +53,7 @@ export interface CreateEffectSagaRunnerFn {
       E,
       StoreService | Layer.Layer.Success<Layers[number]>
     >,
-    options: {
-      extraLayers: Layers
-    },
+    options?: CreateEffectSagaRunnerOptions<Layers>,
   ): Promise<EffectSagaRunner<A, E, Layer.Layer.Success<Layers[number]>>>
 }
 export const createEffectSagaRunner: CreateEffectSagaRunnerFn =
@@ -64,16 +64,36 @@ async function _createEffectSagaRunner<
   Layers extends Layer.Layer<any, any, any>[] = never[],
 >(
   saga: Effect.Effect<A, E, StoreService | Layer.Layer.Success<Layers[number]>>,
-  options: {
-    extraLayers?: Layers
-  } = {},
+  options: CreateEffectSagaRunnerOptions<Layers> = {},
 ): Promise<EffectSagaRunner<A, E, Layer.Layer.Success<Layers[number]>>> {
   const storeDefer = defer<ReduxStore & StoreExt>()
 
   let running: null | {
     runtime: Runtime.Runtime<any>
-    fiber: Fiber.Fiber<any, any>
+    fiber: Fiber.RuntimeFiber<any, any>
   } = null
+
+  const onError = options.onError ?? defaultRunnerErrorHandler
+
+  const attachFiberObserver = (
+    runtime: Runtime.Runtime<any>,
+    fiber: Fiber.RuntimeFiber<any, any>,
+  ): void => {
+    running = {
+      runtime,
+      fiber,
+    }
+
+    fiber.addObserver(exit => {
+      if (running?.fiber === fiber) {
+        running = null
+      }
+
+      if (Exit.isFailure(exit) && !Cause.isInterruptedOnly(exit.cause)) {
+        onError(exit)
+      }
+    })
+  }
 
   const enhancer = effectSagaEnhancerFactory(store => {
     if (!storeDefer.isPending) {
@@ -92,8 +112,7 @@ async function _createEffectSagaRunner<
     })
 
     const fiber = Runtime.runFork(runtime, saga as any)
-
-    running = { runtime, fiber }
+    attachFiberObserver(runtime, fiber)
   }
 
   const stop = async (): Promise<void> => {
@@ -107,12 +126,10 @@ async function _createEffectSagaRunner<
     saga: Effect.Effect<any, any, any>,
   ): Promise<void> => {
     if (running) {
-      await Runtime.runPromise(running.runtime, Fiber.interrupt(running.fiber))
-      const fiber = Runtime.runFork(running.runtime, saga)
-      running = {
-        runtime: running.runtime,
-        fiber,
-      }
+      const { runtime } = running
+      await Runtime.runPromise(runtime, Fiber.interrupt(running.fiber))
+      const fiber = Runtime.runFork(runtime, saga)
+      attachFiberObserver(runtime, fiber)
     }
   }
 
@@ -139,6 +156,13 @@ export async function makeSagaRuntime<
   const runtimeEffect = Layer.toRuntime(appLayer)
 
   return await Effect.runPromise(Effect.scoped(runtimeEffect) as any)
+}
+
+const defaultRunnerErrorHandler = (exit: Exit.Failure<any, any>): void => {
+  console.groupCollapsed('[effect-saga] Unhandled saga error:')
+  console.error(Cause.pretty(exit.cause))
+  console.error(exit)
+  console.groupEnd()
 }
 
 export function combineSagas<Sagas extends Effect.Effect<any, any, any>[] = []>(

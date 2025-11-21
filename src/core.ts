@@ -130,7 +130,7 @@ export const takeEvery = Effect.fn('takeEvery')(function* <
 ) {
   yield* stream.pipe(
     Stream.flatMap(a => handler(a), {
-      concurrency: 1,
+      concurrency: 'unbounded',
     }),
     Stream.run(Sink.drain),
   )

@@ -1,6 +1,6 @@
 import { Action, combineReducers, createStore } from 'redux'
-import { Context, Effect, Fiber, Layer, Runtime } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { Context, Effect, Exit, Fiber, Layer, Runtime } from 'effect'
+import { describe, expect, it, vi } from 'vitest'
 import { actionPattern, makeActionStream, put, select, take } from '../core'
 import { sleep } from '../helpers/promiseHelpers'
 import {
@@ -119,6 +119,23 @@ describe('createEffectSagaRunner', () => {
     await sleep(100)
 
     expect(store.getState().test.value).toBe(1)
+
+    await runner.stop()
+  })
+
+  it('should call onError when saga fails', async () => {
+    const errorSignal = vi.fn()
+    const saga = Effect.fail('boom')
+
+    const runner = await createEffectSagaRunner(saga, {
+      onError: errorSignal,
+    })
+
+    createStore((state = {}) => state, runner.enhancer)
+
+    await runner.start()
+
+    expect(Exit.isFailure(errorSignal.mock.calls[0][0])).toBe(true)
 
     await runner.stop()
   })
