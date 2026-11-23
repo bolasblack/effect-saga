@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
 ### Breaking changes
 
 - Require `effect@^4.0.6`. For TypeScript projects, use TypeScript 5.9 or later with `strict` enabled.
@@ -17,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CommonJS `require('effect-saga')` requires Node.js support for `require(esm)`.
   Node.js enables it by default starting with 20.19 on the 20.x line and 22.12 on the 22.x line.
   [Node.js module loading](https://nodejs.org/api/modules.html#loading-ecmascript-modules-using-require)
+- Use the package root for public APIs. Imports under `effect-saga/src/` and `effect-saga/dist/`
+  now require a file extension. If you imported `makeSagaRuntime` from `src`, use
+  `createEffectSagaRunner` for sagas or `ManagedRuntime.make` with `makeStoreService` to run
+  effects that need the Redux store.
 - Each layer passed in `extraLayers` needs all its dependencies provided. Use `Layer.provide`
   to supply those dependencies before passing the layer to `createEffectSagaRunner`.
 - A failure in `combineSagas` interrupts running sagas and can skip sagas that have yet to start.
