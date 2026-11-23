@@ -1,12 +1,19 @@
 import { Action, combineReducers, createStore } from 'redux'
-import { Context, Effect, Exit, Fiber, Layer, Runtime } from 'effect'
+import { Context, Deferred, Effect, Exit, Fiber, Layer } from 'effect'
 import { describe, expect, it, vi } from 'vitest'
-import { actionPattern, makeActionStream, put, select, take } from '../core'
+import {
+  actionPattern,
+  makeActionStream,
+  makeStoreService,
+  put,
+  select,
+  take,
+} from '../core'
+import { defer } from '../helpers/defer'
 import { sleep } from '../helpers/promiseHelpers'
 import {
   combineSagas,
   createEffectSagaRunner,
-  makeSagaRuntime,
 } from './effectSagaEnhancerFactory'
 import { subscribeStoreActionEnhancerFactory } from './subscribeStoreActionEnhancerFactory'
 
@@ -23,14 +30,12 @@ describe('createEffectSagaRunner', () => {
   })
 
   it('should support extra layers', async () => {
-    class TestService extends Context.Tag('TestService')<
+    class TestService extends Context.Service<
       TestService,
       { getValue: () => number }
-    >() {}
+    >()('TestService') {}
 
-    const testLayer = Layer.succeed(TestService, {
-      getValue: () => 42,
-    })
+    const Multiplier = Context.Service<number>('Multiplier')
 
     interface SetValueAction extends Action {
       type: 'test/setValue'
@@ -39,13 +44,17 @@ describe('createEffectSagaRunner', () => {
 
     const saga = Effect.gen(function* () {
       const service = yield* TestService
-      const value = service.getValue()
+      const multiplier = yield* Multiplier
+      const value = service.getValue() * multiplier
       const action: SetValueAction = { type: 'test/setValue', payload: value }
       yield* put(action)
     })
 
     const runner = await createEffectSagaRunner(saga, {
-      extraLayers: [testLayer],
+      extraLayers: [
+        Layer.succeed(TestService, { getValue: () => 21 }),
+        Layer.succeed(Multiplier, 2),
+      ],
     })
 
     interface TestState {
@@ -135,9 +144,79 @@ describe('createEffectSagaRunner', () => {
 
     await runner.start()
 
-    expect(Exit.isFailure(errorSignal.mock.calls[0][0])).toBe(true)
+    expect(errorSignal).toHaveBeenCalledWith(Exit.fail('boom'))
 
     await runner.stop()
+  })
+
+  it('keeps scoped layers open across a switch and releases them after the saga stops', async () => {
+    const events: string[] = []
+    const layer = Layer.effectDiscard(
+      Effect.acquireRelease(
+        Effect.sync(() => events.push('open')),
+        () => Effect.sync(() => events.push('close')),
+      ),
+    )
+    const saga = (name: string): Effect.Effect<never> =>
+      Effect.sync(() => events.push(`start ${name}`)).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(Effect.sync(() => events.push(`stop ${name}`))),
+      )
+    const onError = vi.fn()
+    const runner = await createEffectSagaRunner(saga('first'), {
+      extraLayers: [layer],
+      onError,
+    })
+    createStore((state = {}) => state, runner.enhancer)
+
+    await Promise.all([runner.start(), runner.start()])
+    await Promise.all([runner.switchSaga(saga('second')), runner.stop()])
+
+    expect(events).toEqual([
+      'open',
+      'start first',
+      'stop first',
+      'start second',
+      'stop second',
+      'close',
+    ])
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  it('releases scoped layers when the saga finishes on its own', async () => {
+    const released = defer()
+    const layer = Layer.effectDiscard(
+      Effect.addFinalizer(() => Effect.sync(() => released.resolve())),
+    )
+    const runner = await createEffectSagaRunner(Effect.void, {
+      extraLayers: [layer],
+    })
+    createStore((state = {}) => state, runner.enhancer)
+
+    await runner.start()
+    await released.promise
+  })
+
+  it('releases partially built layers and allows a retry after startup fails', async () => {
+    const released = vi.fn()
+    let attempts = 0
+    const layer = Layer.effectDiscard(
+      Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => Effect.sync(released))
+        if (attempts++ === 0) return yield* Effect.fail('startup failed')
+      }),
+    )
+    const runner = await createEffectSagaRunner(Effect.never, {
+      extraLayers: [layer],
+    })
+    createStore((state = {}) => state, runner.enhancer)
+
+    await expect(runner.start()).rejects.toBe('startup failed')
+    expect(released).toHaveBeenCalledOnce()
+
+    await runner.start()
+    await runner.stop()
+    expect(released).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -191,13 +270,13 @@ describe('combineSagas', () => {
 
     const combined = combineSagas(saga1, saga2, saga3)
     const enhancer = subscribeStoreActionEnhancerFactory()
-    const runtime = await makeSagaRuntime({
-      store: createStore((state = {}) => state, enhancer),
-    })
-    const fiber = Runtime.runFork(runtime, combined)
+    const store = createStore((state = {}) => state, enhancer)
+    const fiber = Effect.runFork(
+      combined.pipe(Effect.provide(makeStoreService(store))),
+    )
 
     await sleep(100)
-    await Runtime.runPromise(runtime, Fiber.interrupt(fiber))
+    await Effect.runPromise(Fiber.interrupt(fiber))
 
     expect(results).toContain('saga1')
     expect(results).toContain('saga2')
@@ -205,22 +284,20 @@ describe('combineSagas', () => {
     expect(results.length).toBe(3)
   })
 
-  it('should handle errors in individual sagas', async () => {
-    const results: string[] = []
+  it('fails with the saga error and interrupts a running sibling', async () => {
+    const started = Deferred.makeUnsafe<void>()
+    const interrupted = vi.fn()
+    const waiting = Deferred.succeed(started, undefined).pipe(
+      Effect.andThen(Effect.never),
+      Effect.onInterrupt(() => Effect.sync(interrupted)),
+    )
+    const failing = Deferred.await(started).pipe(
+      Effect.andThen(Effect.fail('error')),
+    )
 
-    const saga1 = Effect.sync(() => results.push('saga1'))
-    const saga2 = Effect.fail('error')
-    const saga3 = Effect.sync(() => results.push('saga3'))
-
-    const combined = combineSagas(saga1, saga2, saga3)
-    const enhancer = subscribeStoreActionEnhancerFactory()
-    const runtime = await makeSagaRuntime({
-      store: createStore((state = {}) => state, enhancer),
-    })
-
-    await expect(Runtime.runPromise(runtime, combined)).rejects.toThrow('error')
-
-    expect(results).toContain('saga1')
-    expect(results).toContain('saga3')
+    await expect(
+      Effect.runPromise(combineSagas(waiting, failing)),
+    ).rejects.toBe('error')
+    expect(interrupted).toHaveBeenCalledOnce()
   })
 })

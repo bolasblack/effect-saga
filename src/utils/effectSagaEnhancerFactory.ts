@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Fiber, Layer, Runtime } from 'effect'
+import { Cause, Effect, Exit, Fiber, Layer, ManagedRuntime } from 'effect'
 import { Store as ReduxStore, StoreEnhancer } from 'redux'
 import { makeStoreService, StoreService } from '../core'
 import { defer } from '../helpers/defer'
@@ -34,62 +34,89 @@ export interface EffectSagaRunner<A, E = never, R = never> {
   stop: () => Promise<void>
 }
 
-type CreateEffectSagaRunnerOptions<
-  Layers extends Layer.Layer<any, any, any>[] = never[],
-> = {
-  extraLayers?: Layers
-  onError?: (exit: Exit.Failure<any, any>) => void
+type CreateEffectSagaRunnerOptions<A, E> = {
+  onError?: (exit: Exit.Failure<A, E>) => void
 }
 
 export interface CreateEffectSagaRunnerFn {
   <A, E>(
     saga: Effect.Effect<A, E, StoreService>,
-    options?: CreateEffectSagaRunnerOptions,
+    options?: CreateEffectSagaRunnerOptions<A, E>,
   ): Promise<EffectSagaRunner<A, E>>
 
-  <A, E, Layers extends Layer.Layer<any, any, any>[] = never[]>(
+  <A, E, const Layers extends readonly Layer.Layer<never, unknown>[]>(
     saga: Effect.Effect<
       A,
       E,
-      StoreService | Layer.Layer.Success<Layers[number]>
+      StoreService | NoInfer<Layer.Success<Layers[number]>>
     >,
-    options?: CreateEffectSagaRunnerOptions<Layers>,
-  ): Promise<EffectSagaRunner<A, E, Layer.Layer.Success<Layers[number]>>>
+    options: CreateEffectSagaRunnerOptions<
+      A,
+      E | Layer.Error<Layers[number]>
+    > & {
+      extraLayers: Layers
+    },
+  ): Promise<EffectSagaRunner<A, E, Layer.Success<Layers[number]>>>
+
+  // Tuple inference also handles inline Layer constructors.
+  <
+    A,
+    E,
+    Services extends readonly [] | readonly [unknown, ...unknown[]],
+    LayerError,
+  >(
+    saga: Effect.Effect<A, E, StoreService | NoInfer<Services[number]>>,
+    options: CreateEffectSagaRunnerOptions<A, E | LayerError> & {
+      extraLayers: {
+        readonly [Index in keyof Services]: Layer.Layer<
+          Services[Index],
+          LayerError
+        >
+      }
+    },
+  ): Promise<EffectSagaRunner<A, E, Services[number]>>
 }
 export const createEffectSagaRunner: CreateEffectSagaRunnerFn =
   _createEffectSagaRunner
-async function _createEffectSagaRunner<
-  A,
-  E,
-  Layers extends Layer.Layer<any, any, any>[] = never[],
->(
-  saga: Effect.Effect<A, E, StoreService | Layer.Layer.Success<Layers[number]>>,
-  options: CreateEffectSagaRunnerOptions<Layers> = {},
-): Promise<EffectSagaRunner<A, E, Layer.Layer.Success<Layers[number]>>> {
+async function _createEffectSagaRunner<A, E, R, LayerError>(
+  saga: Effect.Effect<A, E, StoreService | R>,
+  options: CreateEffectSagaRunnerOptions<A, E | LayerError> & {
+    extraLayers?: readonly Layer.Layer<R, LayerError>[]
+  } = {},
+): Promise<EffectSagaRunner<A, E, R>> {
   const storeDefer = defer<ReduxStore & StoreExt>()
-
-  let running: null | {
-    runtime: Runtime.Runtime<any>
-    fiber: Fiber.RuntimeFiber<any, any>
-  } = null
-
   const onError = options.onError ?? defaultRunnerErrorHandler
 
-  const attachFiberObserver = (
-    runtime: Runtime.Runtime<any>,
-    fiber: Fiber.RuntimeFiber<any, any>,
-  ): void => {
-    running = {
-      runtime,
-      fiber,
-    }
-
-    fiber.addObserver(exit => {
-      if (running?.fiber === fiber) {
-        running = null
+  type Services = StoreService | R
+  type Saga = Effect.Effect<A, E, Services>
+  type SagaRuntime = ManagedRuntime.ManagedRuntime<Services, LayerError>
+  let running:
+    | {
+        runtime: SagaRuntime
+        fiber: Fiber.Fiber<A, E | LayerError>
       }
+    | undefined
+  let pending = Promise.resolve()
 
-      if (Exit.isFailure(exit) && !Cause.isInterruptedOnly(exit.cause)) {
+  const serialize = (operation: () => Promise<void>): Promise<void> => {
+    const result = pending.then(operation)
+    pending = result.catch(() => {})
+    return result
+  }
+
+  const runSaga = (runtime: SagaRuntime, saga: Saga): void => {
+    const fiber = runtime.runFork(saga)
+    const current = { runtime, fiber }
+    running = current
+    fiber.addObserver(exit => {
+      void serialize(async () => {
+        if (running !== current) return
+        running = undefined
+        const result = await Effect.runPromiseExit(runtime.disposeEffect)
+        if (Exit.isFailure(result)) defaultRunnerErrorHandler(result)
+      })
+
+      if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)) {
         onError(exit)
       }
     })
@@ -103,69 +130,59 @@ async function _createEffectSagaRunner<
     storeDefer.resolve(store)
   })
 
-  const start = async (): Promise<void> => {
-    const store = await storeDefer.promise
+  const stopCurrent = async (): Promise<void> => {
+    const previous = running
+    running = undefined
+    await previous?.runtime.dispose()
+  }
 
-    const runtime = await makeSagaRuntime({
-      store,
-      extraLayers: options.extraLayers,
+  const start = (): Promise<void> =>
+    storeDefer.isPending
+      ? storeDefer.promise.then(start)
+      : serialize(async () => {
+          if (running && !running.fiber.pollUnsafe()) return
+          await stopCurrent()
+          const store = await storeDefer.promise
+          const runtime = ManagedRuntime.make(
+            Layer.mergeAll(
+              makeStoreService(store),
+              ...(options.extraLayers ?? []),
+            ),
+          )
+          await Effect.runPromise(
+            Effect.onError(runtime.contextEffect, () => runtime.disposeEffect),
+          )
+          runSaga(runtime, saga)
+        })
+
+  const switchSaga = (saga: Saga): Promise<void> =>
+    serialize(async () => {
+      if (!running || running.fiber.pollUnsafe()) return
+      const { runtime, fiber } = running
+      await Effect.runPromise(Fiber.interrupt(fiber))
+      runSaga(runtime, saga)
     })
-
-    const fiber = Runtime.runFork(runtime, saga as any)
-    attachFiberObserver(runtime, fiber)
-  }
-
-  const stop = async (): Promise<void> => {
-    if (running) {
-      await Runtime.runPromise(running.runtime, Fiber.interrupt(running.fiber))
-      running = null
-    }
-  }
-
-  const switchSaga = async (
-    saga: Effect.Effect<any, any, any>,
-  ): Promise<void> => {
-    if (running) {
-      const { runtime } = running
-      await Runtime.runPromise(runtime, Fiber.interrupt(running.fiber))
-      const fiber = Runtime.runFork(runtime, saga)
-      attachFiberObserver(runtime, fiber)
-    }
-  }
 
   return {
     enhancer,
     start,
     switchSaga,
-    stop,
+    stop: () => serialize(stopCurrent),
   }
 }
 
-export async function makeSagaRuntime<
-  Layers extends Layer.Layer<any, any, any>[],
->(context: {
-  store: ReduxStore & StoreExt
-  extraLayers?: undefined | Layers
-}): Promise<
-  Runtime.Runtime<StoreService | Layer.Layer.Context<Layers[number]>>
-> {
-  const storeLayer = makeStoreService(context.store)
-
-  const appLayer = Layer.mergeAll(storeLayer, ...(context.extraLayers ?? []))
-
-  const runtimeEffect = Layer.toRuntime(appLayer)
-
-  return await Effect.runPromise(Effect.scoped(runtimeEffect) as any)
-}
-
-const defaultRunnerErrorHandler = (exit: Exit.Failure<any, any>): void => {
+const defaultRunnerErrorHandler = (
+  exit: Exit.Failure<unknown, unknown>,
+): void => {
   console.groupCollapsed('[effect-saga] Unhandled saga error:')
   console.error(Cause.pretty(exit.cause))
   console.error(exit)
   console.groupEnd()
 }
 
-export function combineSagas<Sagas extends Effect.Effect<any, any, any>[] = []>(
+export function combineSagas<
+  Sagas extends Effect.Effect<unknown, unknown, unknown>[] = [],
+>(
   ...sagas: Sagas
 ): Effect.All.Return<
   Sagas,

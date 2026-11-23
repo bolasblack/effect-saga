@@ -1,4 +1,4 @@
-import { Chunk, Effect, Stream } from 'effect'
+import { Effect, Stream } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { streamDistinctUntilChanged } from './streamDistinctUntilChanged'
 
@@ -11,7 +11,6 @@ describe('streamDistinctUntilChanged', () => {
       .pipe(
         streamDistinctUntilChanged((a, b) => a === b),
         Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
       )
       .pipe(Effect.runPromise)
 
@@ -37,7 +36,6 @@ describe('streamDistinctUntilChanged', () => {
       .pipe(
         streamDistinctUntilChanged((a, b) => a.id === b.id),
         Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
       )
       .pipe(Effect.runPromise)
 
@@ -51,11 +49,21 @@ describe('streamDistinctUntilChanged', () => {
       .pipe(
         streamDistinctUntilChanged((a, b) => a === b),
         Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
       )
       .pipe(Effect.runPromise)
 
     expect(result).toEqual(input)
+  })
+
+  it('compares each value against its immediate predecessor', async () => {
+    const stream = streamDistinctUntilChanged(
+      Stream.make(1, 2, 3, 5),
+      (previous, current) => current - previous === 1,
+    )
+
+    const result = await Effect.runPromise(Stream.runCollect(stream))
+
+    expect(result).toEqual([1, 5])
   })
 
   it('should handle empty stream', async () => {
@@ -63,7 +71,6 @@ describe('streamDistinctUntilChanged', () => {
       .pipe(
         streamDistinctUntilChanged((a, b) => a === b),
         Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
       )
       .pipe(Effect.runPromise)
 
@@ -75,7 +82,6 @@ describe('streamDistinctUntilChanged', () => {
       .pipe(
         streamDistinctUntilChanged((a, b) => a === b),
         Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
       )
       .pipe(Effect.runPromise)
 
@@ -92,7 +98,6 @@ describe('streamDistinctUntilChanged', () => {
           (a, b) => a.toLowerCase() === b.toLowerCase(),
         ),
         Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
       )
       .pipe(Effect.runPromise)
 
@@ -105,19 +110,11 @@ describe('streamDistinctUntilChanged', () => {
     )
 
     const result1 = await Stream.make(1, 1, 2, 2, 3)
-      .pipe(
-        distinctNumbers,
-        Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
-      )
+      .pipe(distinctNumbers, Stream.runCollect)
       .pipe(Effect.runPromise)
 
     const result2 = await Stream.make(5, 5, 6, 6, 7)
-      .pipe(
-        distinctNumbers,
-        Stream.runCollect,
-        Effect.map(chunk => Chunk.toArray(chunk)),
-      )
+      .pipe(distinctNumbers, Stream.runCollect)
       .pipe(Effect.runPromise)
 
     expect(result1).toEqual([1, 2, 3])

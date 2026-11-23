@@ -17,24 +17,26 @@ So why not combine the best of both worlds?
 ## Installation
 
 ```bash
-npm install effect-saga
+npm install effect-saga effect@^4.0.6 redux@^5
 # or
-yarn add effect-saga
+yarn add effect-saga effect@^4.0.6 redux@^5
 # or
-pnpm add effect-saga
+pnpm add effect-saga effect@^4.0.6 redux@^5
 ```
+
+Use TypeScript 5.9 or newer with strict type checking. CommonJS on Node.js requires [`require(esm)`](https://nodejs.org/api/modules.html#loading-ecmascript-modules-using-require). It is enabled by default starting with 20.19 on the Node.js 20 line and 22.12 on the Node.js 22 line.
 
 ## Quick Start
 
 ```typescript
-import { createStore, combineReducers } from 'redux'
+import { createStore, combineReducers, type UnknownAction } from 'redux'
 import { Effect } from 'effect'
 import {
   createEffectSagaRunner,
+  combineSagas,
   makeActionStream,
   actionPattern,
   put,
-  select,
   takeEvery,
   takeLatest,
 } from 'effect-saga'
@@ -45,7 +47,7 @@ const DECREMENT = 'counter/decrement'
 const FETCH_DATA = 'data/fetch'
 
 // Define your reducer
-const counterReducer = (state = { value: 0 }, action: any) => {
+const counterReducer = (state = { value: 0 }, action: UnknownAction) => {
   switch (action.type) {
     case INCREMENT:
       return { value: state.value + 1 }
@@ -61,35 +63,29 @@ const rootReducer = combineReducers({
 })
 
 // Create your saga
-const rootSaga = Effect.gen(function* () {
+const rootSaga = combineSagas(
   // Take every increment action
-  yield* takeEvery(makeActionStream(actionPattern(INCREMENT)), action =>
+  takeEvery(makeActionStream(actionPattern(INCREMENT)), ({ action }) =>
     Effect.gen(function* () {
       console.log('Increment action:', action)
       // Dispatch another action
       yield* put({ type: 'counter/logged' })
     }),
-  )
+  ),
 
   // Take only the latest fetch request
-  yield* takeLatest(makeActionStream(actionPattern(FETCH_DATA)), action =>
+  takeLatest(makeActionStream(actionPattern(FETCH_DATA)), ({ action }) =>
     Effect.gen(function* () {
-      try {
-        // Perform async operation
-        const response = yield* Effect.tryPromise(() =>
-          fetch(`/api/data/${(action.action as any).payload}`),
-        )
-        const data = yield* Effect.tryPromise(() => response.json())
-
-        // Dispatch success action
-        yield* put({ type: 'data/fetchSuccess', payload: data })
-      } catch (error: any) {
-        // Dispatch error action
-        yield* put({ type: 'data/fetchError', payload: error.message })
-      }
-    }),
-  )
-})
+      if (!('payload' in action) || typeof action.payload !== 'string') return
+      const url = `/api/data/${encodeURIComponent(action.payload)}`
+      const response = yield* Effect.tryPromise(signal => fetch(url, { signal }))
+      const data = yield* Effect.tryPromise(() => response.json())
+      yield* put({ type: 'data/fetchSuccess', payload: data })
+    }).pipe(
+      Effect.catch(error => put({ type: 'data/fetchError', payload: error.message })),
+    ),
+  ),
+)
 
 // Create the saga runner
 const sagaRunner = await createEffectSagaRunner(rootSaga)
@@ -211,7 +207,7 @@ yield* takeLatest(makeActionStream(actionPattern('search/query')), streamValue =
 
 #### `combineSagas(...sagas)`
 
-Runs multiple sagas concurrently.
+Runs multiple sagas concurrently. A failure interrupts running siblings and may skip sagas that have yet to start.
 
 ```typescript
 const rootSaga = combineSagas(userSaga, dataSaga, uiSaga)
@@ -224,22 +220,18 @@ const rootSaga = combineSagas(userSaga, dataSaga, uiSaga)
 You can provide additional Effect layers for dependency injection:
 
 ```typescript
-import { Layer, Context } from 'effect'
+import { Context, Effect, Layer } from 'effect'
+import { createEffectSagaRunner } from 'effect-saga'
 
 // Define a service
-class LoggerService extends Context.Tag('LoggerService')<
+class LoggerService extends Context.Service<
   LoggerService,
   { log: (message: string) => Effect.Effect<void> }
->() {}
+>()('LoggerService') {}
 
 // Create a layer
 const loggerLayer = Layer.succeed(LoggerService, {
   log: message => Effect.sync(() => console.log(message)),
-})
-
-// Create saga runner with extra layers
-const sagaRunner = await createEffectSagaRunner(rootSaga, {
-  extraLayers: [loggerLayer],
 })
 
 // Use the service in your saga
@@ -247,7 +239,13 @@ const saga = Effect.gen(function* () {
   const logger = yield* LoggerService
   yield* logger.log('Saga started')
 })
+
+const sagaRunner = await createEffectSagaRunner(saga, {
+  extraLayers: [loggerLayer],
+})
 ```
+
+Provide dependencies of extra layers with `Layer.provide` before passing them to the runner. Scoped layers are shared across `switchSaga` calls and released when the active saga finishes or the runner stops.
 
 ### Dynamic Saga Switching
 
@@ -267,10 +265,11 @@ The library exposes Effect's Stream API for advanced use cases:
 
 ```typescript
 import { Stream } from 'effect'
+import { actionPattern, makeActionStream } from 'effect-saga'
 
 const customStream = makeActionStream(actionPattern()).pipe(
-  Stream.filter(action => action.meta?.important),
-  Stream.throttle({ duration: '1 second', chunks: 1 }),
+  Stream.filter(({ action }) => action.type === 'task/start'),
+  Stream.throttle({ duration: '1 second', units: 1, cost: () => 1 }),
   Stream.map(action => ({
     ...action,
     timestamp: Date.now(),
@@ -324,7 +323,8 @@ const customStream = makeActionStream(actionPattern()).pipe(
 Testing sagas is straightforward since they yield declarative effects:
 
 ```typescript
-import { Effect, Exit } from 'effect'
+import { Effect, Layer } from 'effect'
+import { StoreService } from 'effect-saga'
 import { testSaga } from './sagas'
 
 describe('MySaga', () => {
@@ -333,13 +333,13 @@ describe('MySaga', () => {
     const testStore = {
       dispatch: vi.fn(),
       getState: () => ({ user: { id: 1 } }),
-      subscribeAction: vi.fn(),
+      subscribeAction: () => () => {},
     }
 
     const testLayer = Layer.succeed(StoreService, testStore)
 
     // Run the saga with test layer
-    const result = await Effect.runPromise(
+    await Effect.runPromise(
       testSaga.pipe(Effect.provide(testLayer)),
     )
 
@@ -363,12 +363,18 @@ If you're migrating from redux-saga, here's a comparison of common patterns:
 | `yield takeEvery('ACTION', saga)`  | `yield* takeEvery(stream, handler)`                      |
 | `yield takeLatest('ACTION', saga)` | `yield* takeLatest(stream, handler)`                     |
 | `yield call(fn, ...args)`          | `yield* Effect.tryPromise(() => fn(...args))`            |
-| `yield fork(saga)`                 | `yield* Effect.fork(saga)`                               |
+| `yield fork(saga)`                 | `yield* Effect.forkChild(saga)`                          |
 | `yield all([...])`                 | `yield* Effect.all([...])`                               |
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+### Effect source reference
+
+`repos/effect` contains the upstream source and tests for the Effect version pinned by this project. Contributors and coding agents can trace behavior such as fiber cancellation and layer cleanup against the implementation we actually run. [Effect's recommendation for keeping dependency source nearby](https://effect.website/blog/the-one-weird-git-trick-that-makes-coding-agents-more-effect-ive/)
+
+Project code imports the installed `effect` package. The reference subtree stays outside the build and npm package. [AGENTS.md](AGENTS.md) describes how to refresh it when the Effect version changes.
 
 ## License
 

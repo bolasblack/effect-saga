@@ -1,5 +1,5 @@
 import { Action, Store as ReduxStore, UnknownAction } from 'redux'
-import { Chunk, Context, Effect, Layer, Sink, Stream, StreamEmit } from 'effect'
+import { Context, Effect, Layer, Option, Queue, Stream } from 'effect'
 import { streamDistinctUntilChanged } from './utils/streamDistinctUntilChanged'
 import { SubscribeStoreActionFn } from './utils/subscribeStoreActionEnhancerFactory'
 
@@ -13,7 +13,7 @@ export type Store<
 }
 
 // Service tags for dependency injection
-export class StoreService extends Context.Tag('StoreService')<
+export class StoreService extends Context.Service<
   StoreService,
   {
     readonly dispatch: (action: UnknownAction) => void
@@ -22,7 +22,7 @@ export class StoreService extends Context.Tag('StoreService')<
       listener: (action: UnknownAction, stateSnapshot: unknown) => void,
     ) => () => void
   }
->() {}
+>()('StoreService') {}
 
 export const makeStoreService = (store: Store): Layer.Layer<StoreService> =>
   Layer.succeed(
@@ -34,23 +34,24 @@ export const makeStoreService = (store: Store): Layer.Layer<StoreService> =>
     }),
   )
 
-const storeActionStream = Stream.asyncPush(
-  (
-    emit: StreamEmit.EmitOpsPush<
-      never,
-      {
-        action: UnknownAction
-        stateSnapshot: unknown
-        state: unknown
-      }
-    >,
-  ) =>
+type StoreAction = {
+  action: UnknownAction
+  stateSnapshot: unknown
+  state: unknown
+}
+
+const storeActionStream = Stream.callback<StoreAction, never, StoreService>(
+  queue =>
     Effect.acquireRelease(
       Effect.gen(function* () {
         const store = yield* StoreService
 
         return store.subscribeAction((action, stateSnapshot) => {
-          void emit.single({ action, stateSnapshot, state: store.getState() })
+          Queue.offerUnsafe(queue, {
+            action,
+            stateSnapshot,
+            state: store.getState(),
+          })
         })
       }),
       unsubscribe => Effect.sync(() => unsubscribe()),
@@ -112,11 +113,7 @@ export function makeStateStream<S, T>(
 export function take<A, E, R>(
   stream: Stream.Stream<A, E, R>,
 ): Effect.Effect<A, E, R> {
-  return stream.pipe(
-    Stream.take(1),
-    Stream.runCollect,
-    Effect.map(chunk => Chunk.unsafeGet(chunk, 0)),
-  )
+  return stream.pipe(Stream.runHead, Effect.map(Option.getOrThrow))
 }
 
 export const takeEvery = Effect.fn('takeEvery')(function* <
@@ -129,10 +126,11 @@ export const takeEvery = Effect.fn('takeEvery')(function* <
   handler: (value: AInput) => Effect.Effect<AOutput, E, R>,
 ) {
   yield* stream.pipe(
-    Stream.flatMap(a => handler(a), {
+    Stream.mapEffect(handler, {
       concurrency: 'unbounded',
+      unordered: true,
     }),
-    Stream.run(Sink.drain),
+    Stream.runDrain,
   )
 })
 
@@ -146,11 +144,8 @@ export const takeLatest = Effect.fn('takeLatest')(function* <
   handler: (value: AInput) => Effect.Effect<AOutput, E, R>,
 ) {
   yield* stream.pipe(
-    Stream.flatMap(a => handler(a), {
-      concurrency: 1,
-      switch: true,
-    }),
-    Stream.run(Sink.drain),
+    Stream.switchMap(value => Stream.fromEffect(handler(value))),
+    Stream.runDrain,
   )
 })
 

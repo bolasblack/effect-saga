@@ -1,4 +1,4 @@
-import { Deferred, Effect, Stream } from 'effect'
+import { Deferred, Effect, Fiber, Stream } from 'effect'
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import {
   Store,
@@ -138,7 +138,7 @@ describe('effect-saga core', () => {
         const emitted: any[] = []
 
         // Start collecting values
-        const fiber = yield* Effect.fork(
+        const fiber = yield* Effect.forkChild(
           makeActionStream(pattern).pipe(
             Stream.take(1),
             Stream.runForEach(value => Effect.sync(() => emitted.push(value))),
@@ -156,12 +156,13 @@ describe('effect-saga core', () => {
         )
 
         // wait fiber to finish
-        yield* fiber.await
+        yield* Fiber.join(fiber)
 
         expect(emitted).toHaveLength(1)
         expect(emitted[0].action).toEqual({ type: 'test/action', payload: 1 })
         expect(emitted[0].stateSnapshot).toEqual(1)
         expect(emitted[0].state).toEqual(initialState)
+        expect(listeners.size).toBe(0)
       })
 
       await Effect.runPromise(program.pipe(Effect.provide(layer)))
@@ -220,7 +221,7 @@ describe('effect-saga core', () => {
         const stream = makeStateStream((state: State) => state.counter)
         const values: number[] = []
 
-        const fiber = yield* Effect.fork(
+        const fiber = yield* Effect.forkChild(
           stream.pipe(
             Stream.take(3),
             Stream.runForEach(value => Effect.sync(() => values.push(value))),
@@ -239,7 +240,7 @@ describe('effect-saga core', () => {
           listeners.forEach(l => l({ type: 'UPDATE' }, {}))
         })
 
-        yield* fiber.await
+        yield* Fiber.join(fiber)
         expect(values).toEqual([0, 1, 2])
       })
 
@@ -268,7 +269,7 @@ describe('effect-saga core', () => {
         const values: number[] = []
 
         // Start collecting values in background
-        const fiber = yield* Effect.fork(
+        const fiber = yield* Effect.forkChild(
           stream.pipe(
             Stream.take(3),
             Stream.runForEach(value => Effect.sync(() => values.push(value))),
@@ -301,7 +302,7 @@ describe('effect-saga core', () => {
           listeners.forEach(l => l({ type: 'action4' }, {}))
         })
 
-        yield* fiber.await
+        yield* Fiber.join(fiber)
         expect(values).toEqual([0, 1, 2])
       })
 
